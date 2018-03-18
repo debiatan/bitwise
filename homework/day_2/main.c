@@ -26,6 +26,8 @@ typedef uint8_t Byte;
 typedef enum{
     ParserState_ExpectingSubExpression,
     ParserState_Complete,
+    ParserState_Complete_Reject_Symbol_Extension,
+    ParserState_Error
 } ParserState;
 
 typedef enum{
@@ -177,67 +179,80 @@ void expand_number_literal(Parser *parser, char c){
     parser->cur->literal_value += c-'0';
 }
 
-void parse(Parser *parser, char c){ // NOTE: No lexing because I'm feeling lazy
-    if(c == ' '){ 
-        // NOTE: ignore
-    }
-    else{
-        Operator *op = 0;
-        Expr *cur = parser->cur;
-        switch(parser->state){
-          case ParserState_ExpectingSubExpression:
-              {
-                if(c >= '0' && c <= '9'){
-                    cur->arity = Arity_Leaf;
-                    expand_number_literal(parser, c);
-                    parser->state = ParserState_Complete;
-                }
-                else if(c == '('){
-                    ++cur->parens_level;
-                    ++parser->parens_level;
-                }
-                else if((op = get_operator(parser, Arity_Unary, c))){
-                    cur->arity = Arity_Unary;
-                    cur->op = op;
-                    cur = push_child_under_role(parser, cur, unary);
+void feed(Parser *parser, char c){
+    Operator *op = 0;
+    Expr *cur = parser->cur;
+    switch(parser->state){
+      case ParserState_ExpectingSubExpression:
+          {
+            if(c >= '0' && c <= '9'){
+                cur->arity = Arity_Leaf;
+                expand_number_literal(parser, c);
+                parser->state = ParserState_Complete;
+            }
+            else if(c == ' '){
+                // NOTE: ignore
+            }
+            else if(c == '('){
+                ++cur->parens_level;
+                ++parser->parens_level;
+            }
+            else if((op = get_operator(parser, Arity_Unary, c))){
+                cur->arity = Arity_Unary;
+                cur->op = op;
+                cur = push_child_under_role(parser, cur, unary);
+            }
+            else{
+                parser->state = ParserState_Error;
+            }
+          } break;
+      case ParserState_Complete:
+      case ParserState_Complete_Reject_Symbol_Extension:
+          {
+            if(c >= '0' && c <= '9' &&
+               parser->state != ParserState_Complete_Reject_Symbol_Extension){
+                assert(cur->arity == Arity_Leaf);
+                expand_number_literal(parser, c);
+            }
+            else if(c == ' '){
+                parser->state = ParserState_Complete_Reject_Symbol_Extension;
+            }
+            else if(c == ')'){
+                if(!parser->parens_level){
+                    parser->state = ParserState_Error;
                 }
                 else{
-                    // NOTE: ignore
-                }
-              } break;
-          case ParserState_Complete:
-              {
-                if(c >= '0' && c <= '9'){
-                    assert(cur->arity == Arity_Leaf);
-                    expand_number_literal(parser, c);
-                }
-                else if(c == ')'){
                     --parser->parens_level;
+                    parser->state = ParserState_Complete_Reject_Symbol_Extension;
                 }
-                else if((op = get_operator(parser, Arity_Binary, c))){
-                    Expr *future_left_subtree = future_op_subtree(parser, Arity_Binary, op);
+            }
+            else if((op = get_operator(parser, Arity_Binary, c))){
+                Expr *future_left_subtree = future_op_subtree(parser, Arity_Binary, op);
 
-                    Expr *op_node = alloc_displace(parser, future_left_subtree);
-                      {
-                        op_node->arity = Arity_Binary;
-                        op_node->op = op;
-                        assert(!(op_node)->left);
-                        op_node->left = future_left_subtree;
-                      }
+                Expr *op_node = alloc_displace(parser, future_left_subtree);
+                  {
+                    op_node->arity = Arity_Binary;
+                    op_node->op = op;
+                    assert(!(op_node)->left);
+                    op_node->left = future_left_subtree;
+                  }
 
-                    future_left_subtree->parent = op_node;
+                future_left_subtree->parent = op_node;
 
-                    cur = push_child_under_role(parser, op_node, right);
-                    parser->state = ParserState_ExpectingSubExpression;
-                }
-                else{
-                    // NOTE: ignore
-                }
-              } break;
-        }
-
-        parser->cur = cur;
+                cur = push_child_under_role(parser, op_node, right);
+                parser->state = ParserState_ExpectingSubExpression;
+            }
+            else{
+                parser->state = ParserState_Error;
+            }
+          } break;
+      case ParserState_Error:
+          {
+            // NOTE: No way out of here
+          } break;
     }
+
+    parser->cur = cur;
 }
 
 typedef struct StrBuf{
@@ -337,21 +352,27 @@ int main(void){
         printf("%s:\n", test[i_test].comment); for(U32 i=0; i<strlen(test[i_test].comment); ++i) printf("="); printf("\n");
 
         for(U32 i = 0; i < input_len; ++i){
-            parse(parser, input[i]);
+            feed(parser, input[i]);
 
             if(input[i] != ' '){
                 printf("%.*s%*s -> ", i+1, input, input_len-i-1, "");
 
-                StrBuf buf = {};
-                to_s_expression(parser->sentinel.unary, &buf);
-                printf("%.*s\n", (U32)buf_len(buf.s), buf.s);
+                if(parser->state == ParserState_Error){
+                    printf("Parsing error");
+                    break;
+                }
+                else{
+                    StrBuf buf = {};
+                    to_s_expression(parser->sentinel.unary, &buf);
+                    printf("%.*s\n", (U32)buf_len(buf.s), buf.s);
+                }
             }
         }
 
         StrBuf buf = {};
         to_s_expression(parser->sentinel.unary, &buf);
 
-        assert(!strcmp(buf.s, test[i_test].expected_output));
+        assert(parser->state == ParserState_Error || !strcmp(buf.s, test[i_test].expected_output));
         printf("\n");
     }
 
